@@ -5,6 +5,7 @@ import (
 	"errors"
 	lua "github.com/yuin/gopher-lua"
 	"log"
+	"reflect"
 	"time"
 	"unsafe"
 )
@@ -131,12 +132,15 @@ static void dumpstack (lua_State *L) {
 import "C"
 
 var printtable = `
-a = {x=0, y=10.2, z={d=true, e=false}}
-return a
+return testmp
 `
 
 var start = time.Now()
 var elapsed = time.Since(start)
+
+type Test struct {
+	Z string
+}
 
 func main() {
 	var L1 *C.struct_lua_State
@@ -159,6 +163,10 @@ func main() {
 	C.lua_createtable(L1, 0, 0)
 	var tableIndex C.int
 	tableIndex = C.lua_gettop(L1)
+
+	testmp := map[interface{}]interface{}{"a": 1, 1: "b", true: 10.0, "c": []string{"x", "y", "z"}, "d": Test{Z: "struct"}}
+
+	Put(L1, "testmp", testmp)
 
 	C.lua_pushvalue(L1, tableIndex)
 	C.lua_setfield(L1, -10002, cTableName)
@@ -209,6 +217,71 @@ func main() {
 	}
 	elapsed = time.Since(start)
 	log.Printf("Gopher-lua Execution took %s", elapsed)
+}
+
+func Put(L *C.struct_lua_State, name string, value interface{}) {
+	pushValueToStack(L, value)
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	C.lua_setfield(L, -10002, cName)
+}
+
+func pushValueToStack(L *C.struct_lua_State, value interface{}) {
+	switch val := reflect.ValueOf(value); val.Kind() {
+	case reflect.Bool:
+		var cValue C.int
+		if value.(bool) {
+			cValue = C.int(1)
+		} else {
+			cValue = C.int(0)
+		}
+
+		C.lua_pushboolean(L, cValue)
+		break
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		cValue := C.long(val.Int())
+		C.lua_pushinteger(L, cValue)
+		break
+	case reflect.Float32, reflect.Float64:
+		cValue := C.double(val.Float())
+		C.lua_pushnumber(L, cValue)
+		break
+	case reflect.Map:
+		C.lua_createtable(L, 0, 0)
+		for k, v := range value.(map[interface{}]interface{}) {
+			pushValueToStack(L, k)
+			pushValueToStack(L, v)
+			C.lua_settable(L, -3)
+		}
+		break
+	case reflect.Struct:
+		C.lua_createtable(L, 0, 0)
+		for i := 0; i < val.NumField(); i++ {
+			if val.Field(i).CanInterface() {
+				varValue := val.Field(i).Interface()
+				pushValueToStack(L, val.Type().Field(i).Name)
+				pushValueToStack(L, varValue)
+				C.lua_settable(L, -3)
+			}
+		}
+		break
+	case reflect.Array, reflect.Slice:
+		C.lua_createtable(L, 0, 0)
+		for i := 0; i < val.Len(); i++ {
+			v := val.Index(i).Interface()
+			pushValueToStack(L, i)
+			pushValueToStack(L, v)
+			C.lua_settable(L, -3)
+		}
+		break
+	case reflect.String:
+		cValue := C.CString(value.(string))
+		defer C.free(unsafe.Pointer(cValue))
+		C.lua_pushstring(L, cValue)
+		break
+	default:
+		panic(errors.New("not supported type"))
+	}
 }
 
 func toGoValue(luaStack *C.struct_lua_State) (res interface{}, err error) {
